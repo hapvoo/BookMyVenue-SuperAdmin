@@ -8,6 +8,7 @@
 
 import { bookingRef, displayRef, fmt } from '../../utils/format.js'
 import { orderBadge } from '../events/orderStatus.js'
+import { bookingStates } from '../../utils/bookingStatus.js'
 
 export const KIND_LABEL = { venue: 'Venue booking', event: 'Event ticket' }
 
@@ -145,6 +146,8 @@ export function matchesQuery(row, query) {
   const haystack = [
     row.id, bookingRef(row.id), displayRef(row), row.title, row.venue, row.eventName, row.location,
     row.customer, row.phone, row.razorpayOrderId, row.razorpayPaymentId,
+    // Searchable, though only displayed inside the expanded row.
+    row.invoiceNumber,
   ].filter(Boolean).join(' ').toLowerCase()
   return haystack.includes(q)
 }
@@ -174,8 +177,8 @@ export function exportParams({ type, status, date, basis, from, to, query } = {}
   return params
 }
 
-// "bookmyvenues_bookings_2026-10-13.xlsx" — matches the server's filename.
-export const exportFilename = (today) => `bookmyvenues_bookings_${today}.xlsx`
+// "hapvoo_bookings_2026-10-13.xlsx" — matches the server's filename.
+export const exportFilename = (today) => `hapvoo_bookings_${today}.xlsx`
 
 // Venue booking badges, keyed by the status the backend reports.
 const VENUE_BADGE = {
@@ -196,6 +199,25 @@ export function statusBadge(row) {
   return VENUE_BADGE[row?.status] || ['neutral', row?.status ? String(row.status) : 'Unknown']
 }
 
+// Badge tone per state tone (utils/bookingStatus *_TONE → components/ui/Badge).
+const BADGE_TONE = { success: 'success', neutral: 'neutral', danger: 'error', warning: 'warning', info: 'info' }
+
+// Booking status and payment status as TWO badges — the server's answers
+// (backend bookings/status_view.py: bookingState / paymentState), derived
+// from the raw lifecycle only when an older server sends neither. The
+// combined one-line statusBadge above stays for compact contexts.
+export function stateBadges(row) {
+  const s = bookingStates(row)
+  return {
+    // An unpaid row says which kind of unpaid it is: a live 5-minute slot
+    // hold, a payment in progress, or a hold that expired.
+    booking: s.holdLabel
+      ? [s.hold === 'expired' ? 'neutral' : 'warning', s.holdLabel]
+      : [BADGE_TONE[s.bookingTone] || 'neutral', s.bookingLabel],
+    payment: [BADGE_TONE[s.paymentTone] || 'neutral', `Payment: ${s.paymentLabel}`],
+  }
+}
+
 // The confirmation shown before deleting one booking. The server enforces
 // the real rule (unpaid only); this just tells the admin what will happen.
 export function deletePrompt(row) {
@@ -206,6 +228,24 @@ export function deletePrompt(row) {
   return {
     title: `Delete booking ${ref}?`,
     body: `${row?.customer || 'This customer'}'s ${what} (${fmt(row?.amountNum)}, no payment captured) will be removed from the Bookings list and the totals. The record is kept on the server for the audit trail; nothing is refunded or charged.`,
+  }
+}
+
+// May the admin email this order's PDF tickets again? Only an event order
+// that is paid and still stands (booking confirmed/completed, payment
+// captured) has valid tickets — the server enforces the same rule (409).
+export function canResendTickets(row) {
+  if (row?.kind !== 'event') return false
+  const s = bookingStates(row)
+  return s.payment === 'completed' && (s.booking === 'confirmed' || s.booking === 'completed')
+}
+
+export function resendPrompt(row) {
+  const ref = displayRef(row)
+  const n = Number(row?.tickets) || 0
+  return {
+    title: `Resend tickets for ${ref}?`,
+    body: `${row?.customer || 'The customer'} will get the ticket email again with the PDF attached (${n} ticket${n === 1 ? '' : 's'}, each with its own QR code), sent to the email address on their account. Nothing goes to the vendor and no SMS is sent. Resends are limited to one every 10 minutes and are recorded in the audit log.`,
   }
 }
 

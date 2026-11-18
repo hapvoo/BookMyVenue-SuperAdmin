@@ -3,10 +3,13 @@ import { useNavigate } from 'react-router-dom'
 import { useAdmin } from '../../context/AdminContext.jsx'
 import useViewport from '../../hooks/useViewport.js'
 import Badge from '../../components/ui/Badge.jsx'
+import ExportButton from '../../components/ui/ExportButton.jsx'
 import Icon from '../../components/ui/Icon.jsx'
 import { APPROVAL_STATUS_META } from './approvalMeta.js'
+import { adminApi } from '../../services/adminApi.js'
 import { placeOf, statusMeta } from '../../utils/format.js'
-import { TELANGANA_DISTRICTS } from '../../constants/districts.js'
+import { exportFileName } from '../../utils/exports.js'
+import { localTodayISO } from '../../utils/slots.js'
 
 const PAGE_SIZE = 10
 
@@ -32,14 +35,13 @@ export default function ApprovalsListPage() {
 
   const day = (a) => parseInt(a.submitted, 10) || 0
 
-  // District filter: every Telangana district (what vendors pick in the
-  // wizard), plus any district/city value present in the data that isn't in
-  // the list — so no approval is ever unfilterable. Categories come from the
-  // data itself.
-  const cityOptions = [...new Set([
-    ...TELANGANA_DISTRICTS,
-    ...approvals.flatMap((a) => [a.district, a.city]).filter(Boolean),
-  ])]
+  // District filter: every district / city present in the data. Venues come
+  // from anywhere in India (784 districts), so the list is built from what
+  // is actually waiting rather than pre-filled with one state's districts —
+  // and no approval is ever unfilterable. Categories come from the data too.
+  const cityOptions = [...new Set(
+    approvals.flatMap((a) => [a.district, a.city]).filter(Boolean),
+  )].sort((x, y) => x.localeCompare(y))
   const categoryOptions = [...new Set(approvals.map((a) => a.category).filter(Boolean))].sort()
   // A record matches when the chosen district equals its district OR (for
   // records from before the backend exposed `district`) its city field.
@@ -79,6 +81,13 @@ export default function ApprovalsListPage() {
         <div style={{ fontSize: 14, color: 'var(--text-muted)', fontWeight: 600 }}>
           {filtered.length} submission{filtered.length === 1 ? '' : 's'}
         </div>
+        {/* Every matching submission — all pages, not just this one. */}
+        <ExportButton
+          fetchFile={() => adminApi.exportReport('approvals', { status: filterStatus, category: filterCat, city: filterCity })}
+          filename={exportFileName('admin_approvals', localTodayISO())}
+          count={filtered.length} noun={filtered.length === 1 ? 'submission' : 'submissions'} what="approvals"
+          title={pages > 1 ? `Exports all ${filtered.length} matching submissions across ${pages} pages` : 'Exports the matching submissions'}
+        />
       </div>
 
       {compact ? (

@@ -1,4 +1,4 @@
-// TheBookMyVenues super-admin — API service layer.
+// HAPVOO super-admin — API service layer.
 //
 // Talks to the real backend only (the demo/mock layer was removed once the
 // /api/admin endpoints went live). Components never touch the network
@@ -8,15 +8,22 @@
 // back as { "detail": "..." } and are surfaced with the HTTP status attached
 // so callers can branch on 401/403 (session expired → sign-in screen).
 
-// Talk to the real admin API. In DEV the base defaults to a RELATIVE
-// `/api/admin` so requests go through the Vite dev proxy (vite.config.js)
-// server-to-server — the backend's CORS allowlist covers only the production
-// domains, so a direct browser call from localhost is refused. Production
-// builds default to the absolute onrender URL. Override either with
-// VITE_ADMIN_API_BASE (no trailing slash) to point dev at a different backend.
-const API_BASE =
-  import.meta.env.VITE_ADMIN_API_BASE ||
-  (import.meta.env.DEV ? '/api/admin' : 'https://bookmyvenues-backend.onrender.com/api/admin')
+// Talk to the real admin API through a SAME-ORIGIN `/api/admin` — in dev via
+// the Vite proxy (vite.config.js), in production via the vercel.json rewrite
+// that forwards /api/* to the backend.
+//
+// Why same-origin (iPhone fix, 2026-11-01): auth is a session COOKIE. When
+// the panel called https://bookmyvenues-backend.onrender.com directly, that
+// cookie belonged to another site — a THIRD-PARTY cookie — and Safari (iOS
+// and macOS) blocks every third-party cookie by default. Sign-in "succeeded"
+// but the next request had no session (401) and the admin was sent straight
+// back to the login screen. Served from the panel's own domain the cookie is
+// first-party and every browser keeps it. Nothing about auth is loosened.
+//
+// VITE_ADMIN_API_BASE (no trailing slash) still overrides it, e.g. to point
+// dev at another backend — an absolute cross-site URL brings the Safari
+// problem back, so production should leave it unset.
+const API_BASE = import.meta.env.VITE_ADMIN_API_BASE || '/api/admin'
 
 // Wake the backend the moment the panel opens — Render's free tier sleeps
 // after idle and a cold start takes ~30s, which otherwise lands entirely on
@@ -29,9 +36,46 @@ export function wakeBackend() {
   fetch(API_BASE.replace(/\/admin$/, '') + '/v1/health', { mode: 'no-cors' }).catch(() => {})
 }
 
-async function request(path, { method = 'GET', body, form, blob = false } = {}) {
+// `signal` lets a page cancel a read it no longer needs (it navigated away);
+// `timeoutMs` turns a request the server never answers into an error the
+// page can show with a Retry, instead of "Loading…" for ever. A cancelled
+// request rejects with err.aborted = true — callers ignore those.
+async function request(path, { method = 'GET', body, form, blob = false, signal, timeoutMs = 0 } = {}) {
+  const controller = new AbortController()
+  let timedOut = false
+  const timer = timeoutMs > 0 ? setTimeout(() => { timedOut = true; controller.abort() }, timeoutMs) : null
+  const onAbort = () => controller.abort()
+  if (signal) {
+    if (signal.aborted) controller.abort()
+    else signal.addEventListener('abort', onAbort, { once: true })
+  }
+  try {
+    return await send(path, { method, body, form, blob, signal: controller.signal })
+  } catch (err) {
+    if (err?.name === 'AbortError') {
+      const wrapped = new Error(timedOut
+        ? 'The server took too long to answer. Please try again.'
+        : 'Request cancelled')
+      wrapped.aborted = !timedOut
+      wrapped.timedOut = timedOut
+      wrapped.status = 0
+      throw wrapped
+    }
+    throw err
+  } finally {
+    if (timer) clearTimeout(timer)
+    if (signal) signal.removeEventListener('abort', onAbort)
+  }
+}
+
+// How long a campaign-page read may take before it shows an error + Retry.
+// Generous: a Render cold start alone can take ~30 s.
+export const CAMPAIGN_READ_TIMEOUT_MS = 45000
+
+async function send(path, { method, body, form, blob, signal }) {
   const res = await fetch(API_BASE + path, {
     method,
+    signal,
     credentials: 'include',
     headers: form
       // Multipart MUST NOT set Content-Type by hand (the browser adds the
@@ -70,6 +114,15 @@ export const adminApi = {
 
   // ---------- reads ----------
   fetchAll: () => request('/bootstrap'),
+  // Dashboard money + booking figures for one date range, venue bookings and
+  // event tickets together (backend reports/finance.py). params: { range:
+  // today|yesterday|7d|30d|month|all|custom, from?, to? } (IST dates).
+  dashboard: (params = {}, { signal } = {}) => {
+    const query = new URLSearchParams(
+      Object.entries(params).filter(([, v]) => v != null && v !== ''),
+    ).toString()
+    return request(`/dashboard${query ? `?${query}` : ''}`, { signal, timeoutMs: 60000 })
+  },
   // The Bookings page as an .xlsx, filtered ON THE SERVER with the page's
   // own filters (type, status, date/basis/from/to/today, q) — see
   // unifiedBookings.exportParams. Resolves to a Blob.
@@ -78,6 +131,16 @@ export const adminApi = {
       Object.entries(params).filter(([, v]) => v != null && v !== ''),
     ).toString()
     return request(`/bookings/export${query ? `?${query}` : ''}`, { blob: true })
+  },
+  // Every other page's Excel export: kind = users | vendors | venues |
+  // approvals | events | payouts | refunds | payments | audit, with that
+  // page's own filters (the server applies them — reports/admin_reports.py).
+  // Resolves to a Blob. Super admin only; each export is audited server-side.
+  exportReport: (kind, params = {}) => {
+    const query = new URLSearchParams(
+      Object.entries(params).filter(([, v]) => v != null && v !== ''),
+    ).toString()
+    return request(`/exports/${encodeURIComponent(kind)}${query ? `?${query}` : ''}`, { blob: true })
   },
 
   // Register-venue: mint a vendor JWT for an owner (create the vendor if the
@@ -90,6 +153,8 @@ export const adminApi = {
   // ---------- writes (called alongside optimistic local updates) ----------
   updateApproval: (id, patch) => request(`/approvals/${id}`, { method: 'PATCH', body: patch }),
   updateVenue: (id, patch) => request(`/venues/${id}`, { method: 'PATCH', body: patch }),
+  // Records that look like test data — read-only list (adminpanel/data_review.py).
+  dataReview: () => request('/data-review'),
   updateVendor: (id, patch) => request(`/vendors/${id}`, { method: 'PATCH', body: patch }),
   updateUser: (id, patch) => request(`/users/${id}`, { method: 'PATCH', body: patch }),
   updateBooking: (id, patch) => request(`/bookings/${id}`, { method: 'PATCH', body: patch }),
@@ -99,6 +164,13 @@ export const adminApi = {
   deleteBooking: (id, reason) => request(
     `/bookings/${encodeURIComponent(id)}`,
     { method: 'DELETE', body: reason ? { reason } : undefined },
+  ),
+  // Email the customer their PDF tickets again — paid orders only; the
+  // server refuses unpaid ones (409), repeats within 10 minutes (429) and
+  // audits every resend. Nothing goes to the vendor and no SMS is sent.
+  resendEventTickets: (id) => request(
+    `/event-orders/${encodeURIComponent(id)}/resend-tickets`,
+    { method: 'POST', body: { confirm: true } },
   ),
   deleteEventOrder: (id, reason) => request(
     `/event-orders/${encodeURIComponent(id)}`,
@@ -128,6 +200,16 @@ export const adminApi = {
     { method: 'DELETE', body: reason ? { reason } : undefined },
   ),
 
+  // All venues → Edit (backend adminpanel/venue_edit.py): every vendor-
+  // submitted detail except bank details, saved to the draft AND the listing.
+  getVenueEdit: (id) => request(`/venues/${id}/edit`),
+  saveVenueEdit: (id, body) => request(`/venues/${id}/edit`, { method: 'PUT', body }),
+  // Vendors → Edit details: contact name / email and business details.
+  // Never bank or payout details — the server neither returns nor accepts
+  // them (backend adminpanel/vendor_profile.py).
+  getVendorProfile: (id) => request(`/vendors/${id}/profile`),
+  saveVendorProfile: (id, body) => request(`/vendors/${id}/profile`, { method: 'PUT', body }),
+
   // Image upload -> a permanent public URL (Supabase, the same bucket venue
   // photos use). Used for event posters: the event write endpoints are
   // JSON-only by design, so the file goes up here and arrives there as a URL.
@@ -136,8 +218,124 @@ export const adminApi = {
     form.append('image', file)
     return request('/uploads', { method: 'POST', form })
   },
+  // Booking verification across ALL venues and events — READ-ONLY (never
+  // checks anyone in; entry is recorded only by the venue's vendor). POST so
+  // the ID stays out of URLs/access logs. -> { found, code, title, message,
+  // eligibleToday, booking }
+  verifyBooking: (bookingId) => request('/check-ins/verify', { method: 'POST', body: { bookingId } }),
+  // ---------- Explore homepage (Homepage page) ----------
+  // Every write answers with the WHOLE page payload (incl. the new
+  // `revision`), so the page always shows what the server now holds. Writes
+  // that replace a list (sections, reorders) send the revision they loaded:
+  // a 409 STALE_HOMEPAGE means another admin saved first — err.detail.homepage
+  // carries the latest payload.
+  getHomepage: () => request('/homepage'),
+  saveHomepageSections: (revision, sections) =>
+    request('/homepage/sections', { method: 'PUT', body: { revision, sections } }),
+  createBanner: (fields) => request('/homepage/banners', { method: 'POST', body: fields }),
+  // `expectedUpdatedAt` = the banner's updatedAt when the editor opened; the
+  // server refuses (409 BANNER_CHANGED) if someone edited it since.
+  updateBanner: (id, fields) =>
+    request(`/homepage/banners/${encodeURIComponent(id)}`, { method: 'PATCH', body: fields }),
+  // Refused (409 PROMOTION_REDEEMED) once a paid booking has used its code.
+  deleteBanner: (id) => request(`/homepage/banners/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+  reorderBanners: (revision, placement, ids) =>
+    request('/homepage/banners/reorder', { method: 'POST', body: { revision, placement, ids } }),
+  // Banner artwork -> { url, width, height, warnings }. The server checks the
+  // format, size and pixel dimensions before storing (slot: desktop | mobile).
+  uploadBannerImage: (file, slot) => {
+    const form = new FormData()
+    form.append('image', file)
+    form.append('slot', slot)
+    return request('/homepage/banner-image', { method: 'POST', form })
+  },
+  featureEvent: (eventId, schedule = {}) =>
+    request('/homepage/featured-events', { method: 'POST', body: { eventId, ...schedule } }),
+  scheduleFeaturedEvent: (eventId, schedule) =>
+    request(`/homepage/featured-events/${eventId}`, { method: 'PATCH', body: schedule }),
+  unfeatureEvent: (eventId) => request(`/homepage/featured-events/${eventId}`, { method: 'DELETE' }),
+  reorderFeaturedEvents: (revision, ids) =>
+    request('/homepage/featured-events/reorder', { method: 'POST', body: { revision, ids } }),
+  reorderFeaturedVenues: (revision, ids) =>
+    request('/homepage/featured-venues/reorder', { method: 'POST', body: { revision, ids } }),
+
+  // ---------- custom sub-categories (the wizards' "Others" option) ----------
+  // Every name, any status (backend adminpanel/subcategories_admin.py).
+  // A vendor's new name is pending until approved here; one added here is
+  // approved at once. status: pending | approved | rejected.
+  listSubcategories: (params = {}) => {
+    const query = new URLSearchParams(
+      Object.entries(params).filter(([, v]) => v !== '' && v != null),
+    ).toString()
+    return request(`/subcategories${query ? `?${query}` : ''}`)
+  },
+  addSubcategory: ({ category, name }) =>
+    request('/subcategories', { method: 'POST', body: { category, name } }),
+  updateSubcategory: (id, patch) => request(`/subcategories/${id}`, { method: 'PATCH', body: patch }),
+
+  // ---------- customer ratings & reviews (moderation only) ----------
+  listRatings: (params = {}) => {
+    const query = new URLSearchParams(
+      Object.entries(params).filter(([, v]) => v != null && v !== ''),
+    ).toString()
+    return request(`/ratings${query ? `?${query}` : ''}`)
+  },
+  // { hidden: true, reason } hides a review from every average and list;
+  // { hidden: false } restores it. Nothing is ever deleted or rewritten.
+  updateRating: (id, patch) => request(`/ratings/${id}`, { method: 'PATCH', body: patch }),
+
   updatePayout: (id, patch) => request(`/payouts/${id}`, { method: 'PATCH', body: patch }),
   resolveReview: (id, resolution) => request(`/reviews/${id}/resolve`, { method: 'POST', body: resolution }),
   saveSettings: (settings) => request('/settings', { method: 'PUT', body: settings }),
   appendAudit: (entry) => request('/audit', { method: 'POST', body: entry }),
+
+  // ---------- Email campaigns (backend campaigns/admin_views.py) ----------
+  // Promotional campaigns (opted-in customers only) and service campaigns
+  // (booking / payment / account notices to registered customers, no offers)
+  // — OTP and booking-confirmation mail are separate and never touched. The Resend key stays on the server; delivery reports show masked
+  // addresses; the audience check lists eligible customers in full (admin
+  // only). Sending is off unless the server's CAMPAIGN_DELIVERY says
+  // otherwise (listCampaigns().delivery.mode).
+  // Reads take { signal } so the page can cancel them when it is left, and
+  // time out instead of hanging (CAMPAIGN_READ_TIMEOUT_MS).
+  listCampaigns: ({ signal } = {}) => request('/campaigns', { signal, timeoutMs: CAMPAIGN_READ_TIMEOUT_MS }),
+  campaignOptions: ({ signal } = {}) => request('/campaigns/options', { signal, timeoutMs: CAMPAIGN_READ_TIMEOUT_MS }),
+  getCampaign: (id, { signal } = {}) => request(`/campaigns/${id}`, { signal, timeoutMs: CAMPAIGN_READ_TIMEOUT_MS }),
+  createCampaign: (fields) => request('/campaigns', { method: 'POST', body: fields }),
+  // `version` = the campaign's version when loaded; 409 STALE if another
+  // admin saved since (err.detail.campaign carries theirs).
+  saveCampaign: (id, fields) => request(`/campaigns/${id}`, { method: 'PATCH', body: fields }),
+  deleteCampaign: (id) => request(`/campaigns/${id}`, { method: 'DELETE' }),
+  duplicateCampaign: (id) => request(`/campaigns/${id}/duplicate`, { method: 'POST' }),
+  // -> { kind, count, eligibleTotal, customers, withEmail, optedIn, suppressed,
+  //      eligibleAccounts, ineligibleTotal, ineligible: [{ key, label, count,
+  //      explanation }], label }. `kind` = 'promotional' | 'service'.
+  estimateAudience: (audience, kind = 'promotional') =>
+    request('/campaigns/audience', { method: 'POST', body: { audience, kind } }),
+  // The customers that audience reaches — the SAME list a send freezes:
+  // -> { total, matched, page, pageSize, recipients: [{ id, name, email,
+  //      city, state, interests, hasInterests, reason, … }] }. Admin-only;
+  // nothing is sent.
+  audienceRecipients: (audience, { page = 1, search = '', kind = 'promotional' } = {}) =>
+    request('/campaigns/audience/recipients', { method: 'POST', body: { audience, kind, page, search } }),
+  // Server-rendered HTML of unsaved edits — exactly what customers receive.
+  previewCampaign: (fields) => request('/campaigns/preview', { method: 'POST', body: fields }),
+  campaignImages: () => request('/campaigns/images'),
+  uploadCampaignImage: (file) => {
+    const form = new FormData()
+    form.append('image', file)
+    return request('/campaigns/images', { method: 'POST', form })
+  },
+  sendCampaignTest: (id, to) => request(`/campaigns/${id}/test`, { method: 'POST', body: { to } }),
+  // { confirm: true, confirmAll?, confirmService? (service campaigns),
+  //   expectedCount, version } — refused (409)
+  // when already sent, when the audience count changed, or delivery is off.
+  sendCampaign: (id, body) => request(`/campaigns/${id}/send`, { method: 'POST', body }),
+  cancelCampaign: (id) => request(`/campaigns/${id}/cancel`, { method: 'POST' }),
+  campaignRecipients: (id, params = {}) => {
+    const query = new URLSearchParams(
+      Object.entries(params).filter(([, v]) => v != null && v !== ''),
+    ).toString()
+    return request(`/campaigns/${id}/recipients${query ? `?${query}` : ''}`)
+  },
 }

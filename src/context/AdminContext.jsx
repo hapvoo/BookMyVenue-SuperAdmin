@@ -277,7 +277,11 @@ export function AdminProvider({ children }) {
   const commitSettings = useCallback(() => {
     savedSettingsRef.current = settingsRef.current
     setSettingsDirty(false)
-    sync(adminApi.saveSettings(settingsRef.current))
+    // Banners are NOT sent: the Homepage page saves them one at a time, and
+    // resending this page's (possibly stale) copy would overwrite another
+    // admin's banner edits.
+    const { banners: _banners, ...rest } = settingsRef.current
+    sync(adminApi.saveSettings(rest))
   }, [sync])
   const discardSettings = useCallback(() => {
     setSettings(savedSettingsRef.current)
@@ -292,7 +296,7 @@ export function AdminProvider({ children }) {
     dataStatus, dataError, retryLoad: loadAll,
     approvals, updateApproval, pendingApprovals,
     venues, setVenues, updateVenue,
-    vendors, updateVendor,
+    vendors, setVendors, updateVendor,
     users, updateUser,
     bookings, updateBooking,
     eventOrders, removeEventOrder, deleteBooking,

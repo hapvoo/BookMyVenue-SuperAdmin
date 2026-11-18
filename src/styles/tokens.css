@@ -1,4 +1,4 @@
-/* BookMyVenues Design System — tokens (imported from the design-system project) */
+/* HAPVOO design tokens (originally the BookMyVenues Design System) (imported from the design-system project) */
 @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:ital,wght@0,400;0,500;0,600;0,700;0,800;1,400&family=Poppins:wght@500;600;700;800&display=swap');
 
 :root {
@@ -25,6 +25,10 @@
   --navy-700: #0C1A32;
   --navy-800: #06152C;
   --navy-900: #030D1E;
+
+  /* ---- Sidebar (black, with the red brand accent for the active item) ---- */
+  --sidebar-bg: #0A0A0A;
+  --sidebar-fg-muted: #C9CDD3;   /* inactive items — 12.6:1 on --sidebar-bg */
 
   /* ---- Neutrals ---- */
   --neutral-0:   #FFFFFF;

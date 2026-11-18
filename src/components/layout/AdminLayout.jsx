@@ -16,23 +16,31 @@ const NAV_ITEMS = [
   { key: 'approvals', path: '/approvals', label: 'Approvals', icon: 'check-circle', badge: true },
   { key: 'venues', path: '/venues', label: 'Live venues', icon: 'building-2' },
   { key: 'all-venues', path: '/all-venues', label: 'All venues', icon: 'archive' },
+  { key: 'subcategories', path: '/subcategories', label: 'Sub-categories', icon: 'tag' },
   { key: 'deletion-requests', path: '/deletion-requests', label: 'Deletion requests', icon: 'inbox', badge: 'deletions' },
   { key: 'vendors', path: '/vendors', label: 'Vendors', icon: 'briefcase' },
   { key: 'users', path: '/users', label: 'Users', icon: 'users' },
   { key: 'bookings', path: '/bookings', label: 'Bookings', icon: 'calendar-check' },
+  { key: 'verify-booking', path: '/verify-booking', label: 'Verify booking', icon: 'shield-check' },
   { key: 'events', path: '/events', label: 'Events', icon: 'ticket', badge: 'events' },
   { key: 'payouts', path: '/payouts', label: 'Payouts', icon: 'wallet' },
   { key: 'refunds', path: '/refunds', label: 'Refunds', icon: 'inbox' },
   { key: 'reviews', path: '/reviews', label: 'Reviews', icon: 'star' },
+  { key: 'homepage', path: '/homepage', label: 'Homepage', icon: 'image' },
+  { key: 'campaigns', path: '/campaigns', label: 'Email Campaigns', icon: 'mail' },
   { key: 'settings', path: '/settings', label: 'Platform Settings', icon: 'settings' },
   { key: 'audit', path: '/audit', label: 'Audit Log', icon: 'file-text' },
+  { key: 'data-review', path: '/data-review', label: 'Data review', icon: 'alert-triangle' },
 ]
 
 const TITLES = {
   '/': 'Dashboard', '/register-venue': 'Register a venue', '/approvals': 'Venue approvals', '/venues': 'Live venues', '/all-venues': 'All venues', '/vendors': 'Vendors',
-  '/users': 'Users', '/bookings': 'Bookings', '/events': 'Events', '/payouts': 'Payouts', '/refunds': 'Refunds', '/reviews': 'Reviews moderation',
+  '/users': 'Users', '/bookings': 'Bookings', '/verify-booking': 'Verify booking', '/events': 'Events', '/payouts': 'Payouts', '/refunds': 'Refunds', '/reviews': 'Reviews moderation',
   '/deletion-requests': 'Deletion requests',
-  '/settings': 'Platform settings', '/audit': 'Audit log',
+  '/settings': 'Platform settings', '/audit': 'Audit log', '/homepage': 'Homepage content',
+  '/campaigns': 'Email campaigns',
+  '/subcategories': 'Sub-categories',
+  '/data-review': 'Data review (test records)',
 }
 
 function LoadingSkeleton() {
@@ -51,7 +59,7 @@ function LoadingSkeleton() {
 }
 
 export default function AdminLayout() {
-  const { authed, setAuthed, admin, pendingApprovals, pendingEvents, approvals, venues, dataStatus, retryLoad } = useAdmin()
+  const { authed, setAuthed, admin, pendingApprovals, pendingEvents, approvals, venues, vendors, dataStatus, retryLoad } = useAdmin()
   const { isMobile, isNarrow: viewportNarrow } = useViewport()
   const location = useLocation()
   const navigate = useNavigate()
@@ -116,6 +124,17 @@ export default function AdminLayout() {
     const sel = approvals.find((a) => String(a.id) === decodeURIComponent(approvalIdMatch[1]))
     if (sel) pageTitle = 'Review: ' + sel.name
   }
+  // All venues → Edit keeps "All venues" highlighted in the sidebar.
+  const editMatch = location.pathname.match(/^\/all-venues\/([^/]+)\/edit$/)
+  if (editMatch) {
+    const sel = venues.find((v) => String(v.id) === decodeURIComponent(editMatch[1]))
+    pageTitle = sel ? 'Edit: ' + sel.name : 'Edit venue'
+  }
+  const vendorEditMatch = location.pathname.match(/^\/vendors\/([^/]+)\/edit$/)
+  if (vendorEditMatch) {
+    const sel = vendors.find((v) => String(v.id) === decodeURIComponent(vendorEditMatch[1]))
+    pageTitle = sel ? 'Edit vendor: ' + sel.name : 'Edit vendor'
+  }
 
   const signOut = () => {
     setMenuOpen(false)
@@ -136,11 +155,12 @@ export default function AdminLayout() {
         onClick={() => { setNavOpen(false); navigate(it.path) }}
         title={it.label}
         className={isActive ? undefined : 'sidebar-item'}
+        aria-current={isActive ? 'page' : undefined}
         style={{
           display: 'flex', alignItems: 'center', gap: 12, height: 44, padding: '0 12px 0 9px',
           border: 'none', borderLeft: `3px solid ${isActive ? 'var(--brand-accent)' : 'transparent'}`,
           background: isActive ? 'rgba(255,255,255,.1)' : 'transparent',
-          color: isActive ? '#fff' : 'var(--neutral-300)',
+          color: isActive ? '#fff' : 'var(--sidebar-fg-muted)',
           fontFamily: 'var(--font-body)', fontSize: 15, fontWeight: 600, cursor: 'pointer',
           width: '100%', textAlign: 'left', borderRadius: '0 10px 10px 0', flex: '0 0 auto',
         }}
@@ -166,7 +186,7 @@ export default function AdminLayout() {
       {!compact && (
         <div style={{ minWidth: 0 }}>
           <div style={{ fontSize: 15.5, fontWeight: 700, color: '#fff', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{admin.name}</div>
-          <div style={{ fontSize: 15.5, color: 'var(--navy-300)' }}>{admin.role}</div>
+          <div style={{ fontSize: 15.5, color: 'var(--sidebar-fg-muted)' }}>{admin.role}</div>
         </div>
       )}
     </div>
@@ -176,16 +196,16 @@ export default function AdminLayout() {
     <div style={{ display: 'flex', minHeight: '100vh', background: 'var(--surface-page)', fontFamily: 'var(--font-body)', color: 'var(--text-body)' }}>
       {/* Sidebar (desktop / tablet) */}
       {!isMobile && (
-        <aside style={{ width: isNarrow ? 68 : 250, flex: '0 0 auto', background: 'var(--navy-800)', position: 'sticky', top: 0, height: '100vh', overflowY: 'auto', display: 'flex', flexDirection: 'column', padding: '20px 12px 16px', gap: 2, transition: 'width .2s ease' }}>
+        <aside className="admin-sidebar" style={{ width: isNarrow ? 68 : 250, flex: '0 0 auto', background: 'var(--sidebar-bg)', position: 'sticky', top: 0, height: '100vh', overflowY: 'auto', display: 'flex', flexDirection: 'column', padding: '20px 12px 16px', gap: 2, transition: 'width .2s ease' }}>
           <button
             onClick={() => navigate('/')}
-            title="TheBookMyVenues home"
+            title="HAPVOO home"
             style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '0 0 20px', minHeight: 48, background: 'none', border: 'none', cursor: 'pointer' }}
           >
             {isNarrow ? (
-              <div style={{ fontFamily: 'var(--font-display)', fontSize: 15, fontWeight: 800, color: '#fff' }}>B<span style={{ color: 'var(--red-500)' }}>M</span>V</div>
+              <img src="/apple-touch-icon.png" alt="HAPVOO" width={36} height={36} style={{ display: 'block', borderRadius: 8 }} />
             ) : (
-              <img src="/assets/logo-sidenav.svg" alt="TheBookMyVenues" style={{ height: 60, width: 'auto', maxWidth: '100%', objectFit: 'contain' }} />
+              <img src="/assets/logo-sidenav.svg" alt="HAPVOO" style={{ height: 60, width: 'auto', maxWidth: '100%', objectFit: 'contain' }} />
             )}
           </button>
 
@@ -197,7 +217,7 @@ export default function AdminLayout() {
             onClick={() => setCollapsed((c) => !c)}
             title="Collapse"
             className="sidebar-item"
-            style={{ display: 'flex', alignItems: 'center', gap: 12, height: 44, padding: '0 12px', border: 'none', background: 'none', color: 'var(--neutral-300)', fontFamily: 'var(--font-body)', fontSize: 15.5, fontWeight: 600, cursor: 'pointer', borderRadius: 10 }}
+            style={{ display: 'flex', alignItems: 'center', gap: 12, height: 44, padding: '0 12px', border: 'none', background: 'none', color: 'var(--sidebar-fg-muted)', fontFamily: 'var(--font-body)', fontSize: 15.5, fontWeight: 600, cursor: 'pointer', borderRadius: 10 }}
           >
             <span style={{ display: 'flex', transform: isNarrow ? 'rotate(180deg)' : 'none', transition: 'transform .2s ease' }}>
               <Icon name="chevrons-left" size={20} />
@@ -213,9 +233,9 @@ export default function AdminLayout() {
       {isMobile && navOpen && (
         <>
           <div onClick={() => setNavOpen(false)} style={{ position: 'fixed', inset: 0, background: 'rgba(6,21,44,.5)', zIndex: 50 }} />
-          <aside style={{ position: 'fixed', top: 0, left: 0, bottom: 0, width: 264, maxWidth: '85vw', background: 'var(--navy-800)', zIndex: 51, overflowY: 'auto', display: 'flex', flexDirection: 'column', padding: '18px 12px 16px', gap: 2, boxShadow: 'var(--shadow-xl)' }}>
+          <aside className="admin-sidebar" style={{ position: 'fixed', top: 0, left: 0, bottom: 0, width: 264, maxWidth: '85vw', background: 'var(--sidebar-bg)', zIndex: 51, overflowY: 'auto', display: 'flex', flexDirection: 'column', padding: '18px 12px 16px', gap: 2, boxShadow: 'var(--shadow-xl)' }}>
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '0 4px 16px' }}>
-              <img src="/assets/logo-sidenav.svg" alt="TheBookMyVenues" style={{ height: 48, width: 'auto', objectFit: 'contain' }} />
+              <img src="/assets/logo-sidenav.svg" alt="HAPVOO" style={{ height: 48, width: 'auto', objectFit: 'contain' }} />
               <button onClick={() => setNavOpen(false)} aria-label="Close menu" style={{ width: 38, height: 38, borderRadius: 10, border: 'none', background: 'rgba(255,255,255,.1)', color: '#fff', cursor: 'pointer', fontSize: 17, fontWeight: 800, flex: '0 0 auto' }}>×</button>
             </div>
             {navList(false)}
@@ -278,11 +298,25 @@ export default function AdminLayout() {
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 16 }}>
             <div style={{ fontFamily: 'var(--font-display)', fontSize: isMobile ? 22 : 27, fontWeight: 800, color: 'var(--text-heading)', letterSpacing: '-0.01em' }}>{pageTitle}</div>
           </div>
-          {loading || dataStatus === 'loading' || dataStatus === 'idle'
+          {dataStatus === 'loading' || dataStatus === 'idle'
             ? <LoadingSkeleton />
             : dataStatus === 'error'
               ? <DataErrorCard onRetry={retryLoad} />
-              : <Outlet />}
+              : (
+                // The short shimmer between sections is drawn OVER the page,
+                // never instead of it: swapping <Outlet /> out unmounted the
+                // page right after it had started loading and mounted a fresh
+                // copy 420 ms later — every section fetched its data twice,
+                // and on the single-worker production server Email Campaigns
+                // queued its list behind its own duplicate requests and sat
+                // on "Loading campaigns…".
+                <>
+                  {loading && <LoadingSkeleton />}
+                  <div style={loading ? { display: 'none' } : { display: 'contents' }}>
+                    <Outlet />
+                  </div>
+                </>
+              )}
         </main>
       </div>
 

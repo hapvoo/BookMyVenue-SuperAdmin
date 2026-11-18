@@ -1,6 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useLocation } from 'react-router-dom'
-import { Download } from 'lucide-react'
 import { useAdmin } from '../../context/AdminContext.jsx'
 import { adminApi } from '../../services/adminApi.js'
 import useViewport from '../../hooks/useViewport.js'
@@ -8,7 +7,9 @@ import { bookingRef, displayRef, fmt } from '../../utils/format.js'
 import { displayInclusiveEnd, localTodayISO } from '../../utils/slots.js'
 import Badge from '../../components/ui/Badge.jsx'
 import Button from '../../components/ui/Button.jsx'
-import { DATE_BASIS_OPTIONS, KIND_LABEL, STATUS_OPTIONS, countByKind, deletePrompt, exportFilename, exportParams, filterBookings, statusBadge, unifyBookings } from './unifiedBookings.js'
+import ExportButton from '../../components/ui/ExportButton.jsx'
+import { NOT_AVAILABLE, adminBookingInfo } from './bookingInfo.js'
+import { DATE_BASIS_OPTIONS, KIND_LABEL, STATUS_OPTIONS, canResendTickets, countByKind, deletePrompt, resendPrompt, exportFilename, exportParams, filterBookings, stateBadges, unifyBookings } from './unifiedBookings.js'
 
 const selectStyle = {
   fontFamily: 'var(--font-body)', fontSize: 15.5, fontWeight: 600, color: 'var(--text-heading)',
@@ -16,18 +17,6 @@ const selectStyle = {
   border: '1px solid var(--border-default)', borderRadius: 10, cursor: 'pointer',
 }
 const dateInputStyle = { ...selectStyle, fontWeight: 500, cursor: 'text' }
-
-// Save a Blob as a file via a temporary object URL.
-function saveBlob(blob, filename) {
-  const url = URL.createObjectURL(blob)
-  const a = document.createElement('a')
-  a.href = url
-  a.download = filename
-  document.body.appendChild(a)
-  a.click()
-  a.remove()
-  setTimeout(() => URL.revokeObjectURL(url), 1000)
-}
 
 // "12 Oct 2026" for an event order's ISO date.
 const dateLabel = (iso) => {
@@ -40,6 +29,16 @@ const eventWhen = (o) => dateLabel(o.date) + (o.startTime ? ` · ${o.startTime}$
 const ticketSummary = (o) => (o.items || []).map((i) => `${i.qty}× ${i.label}`).join(', ')
 
 // Small "Venue booking" / "Event ticket" chip under the reference.
+// Booking status above payment status — two separate answers per row.
+function StateBadges({ sb }) {
+  return (
+    <span style={{ display: 'inline-flex', flexDirection: 'column', alignItems: 'flex-start', gap: 4 }}>
+      <Badge status={sb.booking[0]} size="sm">{sb.booking[1]}</Badge>
+      <Badge status={sb.payment[0]} size="sm">{sb.payment[1]}</Badge>
+    </span>
+  )
+}
+
 function KindChip({ kind }) {
   const event = kind === 'event'
   return (
@@ -67,9 +66,33 @@ function DeleteAction({ row, compact, onDelete }) {
   )
 }
 
+// Booking Info inside an expanded row: invoice number, created time, the
+// time the payment actually succeeded (and its source) and, for venue
+// bookings, the gateway references. Never shown as table columns.
+function BookingRecord({ row, compact, references = true }) {
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 6, borderTop: '1px solid var(--border-subtle)', paddingTop: 10, marginTop: 2 }}>
+      <div style={{ fontSize: 13.5, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '.05em', color: 'var(--text-muted)' }}>Booking &amp; payment record</div>
+      {adminBookingInfo(row, { references }).map((r) => (
+        <div key={r.key} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 10, fontSize: compact ? 15 : 16 }}>
+          <span>{r.label}</span>
+          <span style={{ textAlign: 'right', minWidth: 0 }}>
+            <span style={{
+              display: 'block', fontWeight: 700, overflowWrap: 'anywhere',
+              color: r.value === NOT_AVAILABLE ? 'var(--text-muted)' : 'var(--text-heading)',
+              fontFamily: r.mono ? 'monospace' : undefined,
+            }}>{r.value}</span>
+            {r.note && <span style={{ display: 'block', fontSize: 13, color: 'var(--text-muted)' }}>{r.note}</span>}
+          </span>
+        </div>
+      ))}
+    </div>
+  )
+}
+
 // Expanded panel for an event ticket order: tickets, fee, payment record and
 // the (server-guarded) delete action.
-function EventOrderDetails({ o, compact, onDelete }) {
+function EventOrderDetails({ o, compact, onDelete, onResend }) {
   const line = { display: 'flex', justifyContent: 'space-between', gap: 10, fontSize: compact ? 15 : 16 }
   const strong = { fontWeight: 700, color: 'var(--text-heading)' }
   return (
@@ -99,15 +122,19 @@ function EventOrderDetails({ o, compact, onDelete }) {
           {o.razorpayPaymentId && <> · Payment <span style={{ fontFamily: 'monospace' }}>{o.razorpayPaymentId}</span></>}
           {o.refundReason && <> · Refund reason: {o.refundReason}</>}
         </div>
+        <BookingRecord row={o} compact={compact} references={false} />
       </div>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 6, maxWidth: compact ? 'none' : 220 }}>
+        {canResendTickets(o) && onResend && (
+          <Button variant="secondary" size="sm" block={compact} onClick={() => onResend(o)}>Resend PDF tickets</Button>
+        )}
         <DeleteAction row={o} compact={compact} onDelete={onDelete} />
       </div>
     </div>
   )
 }
 
-const GRID = { display: 'grid', gridTemplateColumns: '120px 1.5fr 1.1fr 1.3fr 110px 95px 150px', minWidth: 1040, gap: 10 }
+const GRID = { display: 'grid', gridTemplateColumns: '120px 1.5fr 1.1fr 1.3fr 110px 95px 190px', minWidth: 1080, gap: 10 }
 
 export default function BookingsPage() {
   const { bookings, updateBooking, eventOrders, deleteBooking, openModal, logAudit, showToast, settings } = useAdmin()
@@ -136,7 +163,6 @@ export default function BookingsPage() {
   const [dateFrom, setDateFrom] = useState('')
   const [dateTo, setDateTo] = useState('')
   const [query, setQuery] = useState('')
-  const [exporting, setExporting] = useState(false)
   // Rows are keyed "venue:<id>" / "event:<id>" — the two tables have separate
   // id spaces. Deep links (activity feed / user drawer) carry a VENUE id.
   const [expandedId, setExpandedId] = useState(location.state?.expandId ? `venue:${location.state.expandId}` : null)
@@ -159,12 +185,16 @@ export default function BookingsPage() {
   // Which screen/pitch was booked: unit bookings target the unit's own
   // listing ("RK PARTY HOUSE — Screen 2"), so the unit is recoverable from
   // the name; an explicit unitLabel from the API wins when present.
+  // Gym memberships, resort packages and big screen surprises say what they
+  // are (the API's `kind`); their unitLabel names the plan / package / show.
+  const KIND_LABEL = { membership: 'Membership', package: 'Resort package', surprise: 'Big screen surprise' }
   const splitUnit = (b) => {
     const full = String(b.venue || '')
     const hasSep = full.includes(' — ')
+    const unit = b.unitLabel || (hasSep ? full.split(' — ').slice(1).join(' — ') : '')
     return {
       base: hasSep ? full.split(' — ')[0] : full,
-      unit: b.unitLabel || (hasSep ? full.split(' — ').slice(1).join(' — ') : ''),
+      unit: KIND_LABEL[b.kind] ? [KIND_LABEL[b.kind], unit].filter(Boolean).join(' · ') : unit,
     }
   }
   const filters = { type: filterType, status: filterStatus, date: filterDate, basis: dateBasis, from: dateFrom, to: dateTo, query }
@@ -175,21 +205,7 @@ export default function BookingsPage() {
   // Download the rows on screen as .xlsx. The SERVER applies the same
   // filters (it never sends the whole table for the browser to sift), so
   // the file holds exactly the matching bookings.
-  const exportExcel = () => {
-    if (exporting) return
-    setExporting(true)
-    adminApi.exportBookings(exportParams(filters, today))
-      .then((blob) => {
-        saveBlob(blob, exportFilename(today))
-        showToast(`Exported ${filtered.length} booking${filtered.length === 1 ? '' : 's'} to Excel`)
-      })
-      .catch((err) => showToast(
-        err.status === 401 || err.status === 403
-          ? 'Your admin session has expired. Sign in again to export bookings.'
-          : `Could not export bookings: ${err.message || 'request failed'}`,
-      ))
-      .finally(() => setExporting(false))
-  }
+  const exportExcel = () => adminApi.exportBookings(exportParams(filters, today))
 
   // Delete an UNPAID booking of either kind. The server re-checks everything
   // (paid, active, refunded and mid-checkout rows are refused), so this
@@ -209,6 +225,23 @@ export default function BookingsPage() {
           err.status === 401 || err.status === 403
             ? 'Your admin session has expired. Sign in again to delete bookings.'
             : `Could not delete ${ref}: ${err.message || 'request failed'}`,
+        ))
+    },
+  })
+
+  // Email the customer their PDF tickets again (paid orders only). The
+  // server checks payment, applies a 10-minute cooldown and audits it.
+  const confirmResend = (row) => openModal({
+    ...resendPrompt(row),
+    confirmLabel: 'Resend tickets',
+    onConfirm: () => {
+      const ref = displayRef(row)
+      adminApi.resendEventTickets(row.id)
+        .then(() => showToast(`Tickets for ${ref} sent to the customer again`))
+        .catch((err) => showToast(
+          err.status === 401 || err.status === 403
+            ? 'Your admin session has expired. Sign in again to resend tickets.'
+            : `Could not resend tickets for ${ref}: ${err.message || 'request failed'}`,
         ))
     },
   })
@@ -279,14 +312,12 @@ export default function BookingsPage() {
           {filtered.length} booking{filtered.length === 1 ? '' : 's'}
           {filterType === 'All' && filtered.length > 0 && ` · ${counts.venue} venue · ${counts.event} event`}
         </div>
-        <Button
-          variant="secondary" size="sm" onClick={exportExcel}
-          disabled={exporting || rangeInvalid || filtered.length === 0}
-          style={{ minHeight: 40 }}
-        >
-          <Download size={17} strokeWidth={2.2} aria-hidden="true" />
-          {exporting ? 'Exporting…' : 'Export Excel'}
-        </Button>
+        <ExportButton
+          fetchFile={exportExcel} filename={exportFilename(today)}
+          count={filtered.length} noun={filtered.length === 1 ? 'booking' : 'bookings'}
+          what="bookings" disabled={rangeInvalid}
+          title="Exports every booking matching these filters — all of them, not just the ones on screen"
+        />
       </div>
       {filterDate !== 'All' && (
         <div style={{ fontSize: 13.5, color: rangeInvalid ? 'var(--error-600)' : 'var(--text-muted)', marginTop: -4 }}>
@@ -302,7 +333,7 @@ export default function BookingsPage() {
         <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
           {filtered.map((b) => {
             if (b.kind === 'event') {
-              const [tone, text] = statusBadge(b)
+              const sb = stateBadges(b)
               const expanded = expandedId === b.key
               return (
                 <div key={b.key} className="card" style={{ padding: 14, display: 'flex', flexDirection: 'column', gap: 10 }}>
@@ -311,7 +342,7 @@ export default function BookingsPage() {
                       <span style={{ fontWeight: 800, color: 'var(--text-heading)', fontSize: 15.5 }}>{displayRef(b)}</span>
                       <KindChip kind="event" />
                       <span style={{ flex: 1 }} />
-                      <Badge status={tone} size="sm">{text}</Badge>
+                      <StateBadges sb={sb} />
                     </div>
                     <div style={{ fontSize: 16, fontWeight: 700, color: 'var(--text-heading)' }}>{b.eventName || '—'}</div>
                     <div style={{ fontSize: 14.5, color: 'var(--text-muted)' }}>{b.customer || '—'}{b.phone ? ` · ${b.phone}` : ''} · {eventWhen(b)}</div>
@@ -323,11 +354,11 @@ export default function BookingsPage() {
                       <span style={{ fontSize: 13.5, fontWeight: 700, color: 'var(--text-muted)' }}>{expanded ? 'Hide details ▲' : 'View details ▼'}</span>
                     </div>
                   </div>
-                  {expanded && <EventOrderDetails o={b} compact onDelete={confirmDelete} />}
+                  {expanded && <EventOrderDetails o={b} compact onDelete={confirmDelete} onResend={confirmResend} />}
                 </div>
               )
             }
-            const [badge, label] = statusBadge(b)
+            const sb = stateBadges(b)
             const expanded = expandedId === b.key
             const canRefund = b.status === 'confirmed' || b.status === 'refund_pending'
             return (
@@ -337,7 +368,7 @@ export default function BookingsPage() {
                     <span style={{ fontWeight: 800, color: 'var(--text-heading)', fontSize: 15.5 }}>{bookingRef(b.id)}</span>
                     <KindChip kind="venue" />
                     <span style={{ flex: 1 }} />
-                    <Badge status={badge} size="sm">{label}</Badge>
+                    <StateBadges sb={sb} />
                   </div>
                   {(() => { const u = splitUnit(b); return (
                     <div style={{ fontSize: 16, fontWeight: 700, color: 'var(--text-heading)', display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
@@ -374,6 +405,7 @@ export default function BookingsPage() {
                         Paid at the venue — the {rowFee(b)} platform fee is deducted from the vendor&apos;s weekly payout.
                       </div>
                     )}
+                    <BookingRecord row={b} compact />
                     {canRefund && (
                       <Button variant="secondary" size="sm" block onClick={() => refund(b)}>Issue refund</Button>
                     )}
@@ -395,10 +427,10 @@ export default function BookingsPage() {
 
         {filtered.map((b) => {
           if (b.kind === 'event') {
-            const [tone, text] = statusBadge(b)
+            const sb = stateBadges(b)
             const expanded = expandedId === b.key
             return (
-              <div key={b.key} style={{ display: 'flex', flexDirection: 'column', borderBottom: '1px solid var(--neutral-100)', minWidth: 1040 }}>
+              <div key={b.key} style={{ display: 'flex', flexDirection: 'column', borderBottom: '1px solid var(--neutral-100)', minWidth: 1080 }}>
                 <div
                   onClick={() => setExpandedId(expanded ? null : b.key)}
                   className="hover-row"
@@ -419,17 +451,17 @@ export default function BookingsPage() {
                   <div style={{ color: 'var(--text-muted)', fontSize: 16 }}>{eventWhen(b)}</div>
                   <div style={{ fontWeight: 700, color: 'var(--text-heading)' }}>{fmt(b.amount)}</div>
                   <div style={{ fontSize: 15, color: 'var(--text-muted)' }}>{methodLabel(b.method)}</div>
-                  <div><Badge status={tone} size="sm">{text}</Badge></div>
+                  <div><StateBadges sb={sb} /></div>
                 </div>
-                {expanded && <EventOrderDetails o={b} onDelete={confirmDelete} />}
+                {expanded && <EventOrderDetails o={b} onDelete={confirmDelete} onResend={confirmResend} />}
               </div>
             )
           }
-          const [badge, label] = statusBadge(b)
+          const sb = stateBadges(b)
           const expanded = expandedId === b.key
           const canRefund = b.status === 'confirmed' || b.status === 'refund_pending'
           return (
-            <div key={b.key} style={{ display: 'flex', flexDirection: 'column', borderBottom: '1px solid var(--neutral-100)', minWidth: 1040 }}>
+            <div key={b.key} style={{ display: 'flex', flexDirection: 'column', borderBottom: '1px solid var(--neutral-100)', minWidth: 1080 }}>
               <div
                 onClick={() => setExpandedId(expanded ? null : b.key)}
                 className="hover-row"
@@ -452,7 +484,7 @@ export default function BookingsPage() {
                 <div style={{ color: 'var(--text-muted)', fontSize: 16 }}>{displayInclusiveEnd(b.slot)}</div>
                 <div style={{ fontWeight: 700, color: 'var(--text-heading)' }}>{fmt(b.amountNum)}</div>
                 <div style={{ fontSize: 15, color: atVenue(b) ? 'var(--warning-600)' : 'var(--text-muted)', fontWeight: atVenue(b) ? 700 : 400 }}>{methodLabel(b.method)}</div>
-                <div><Badge status={badge} size="sm">{label}</Badge></div>
+                <div><StateBadges sb={sb} /></div>
               </div>
 
               {expanded && (
@@ -477,6 +509,7 @@ export default function BookingsPage() {
                         Paid at the venue — the {rowFee(b)} platform fee is deducted from the vendor&apos;s weekly payout.
                       </div>
                     )}
+                    <BookingRecord row={b} />
                   </div>
                   {(canRefund || b.removable || b.removeBlockedReason) && (
                     <div style={{ display: 'flex', flexDirection: 'column', gap: 6, maxWidth: 220 }}>
